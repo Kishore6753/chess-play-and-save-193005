@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import List, Optional
 
 import chess
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import delete, or_, select
 from sqlalchemy.orm import Session
 
@@ -278,16 +278,17 @@ def load_game_snapshot(game_id: str, payload: LoadGameRequest, db: Session = Dep
 @router.delete(
     "/{game_id}",
     status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
     responses={404: {"model": ErrorResponse}},
     summary="Delete a game (optional)",
     description="Delete a game and its moves/snapshots.",
     operation_id="delete_game",
 )
-def delete_game(game_id: str, db: Session = Depends(get_db)) -> None:
+def delete_game(game_id: str, db: Session = Depends(get_db)) -> Response:
     """Delete a game and related records."""
     game = db.get(Game, game_id)
     if not game:
         raise HTTPException(status_code=404, detail="Game not found.")
     db.delete(game)
     db.commit()
-    return None
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
