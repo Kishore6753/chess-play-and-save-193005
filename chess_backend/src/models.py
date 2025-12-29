@@ -36,7 +36,10 @@ class User(Base):
 
 
 class Game(Base):
-    """A chess game, storing the current board state as FEN plus history of moves."""
+    """A chess game, storing the current board state as FEN plus history of moves.
+
+    Supports both PvP and PvE (AI opponent) via `mode`, `ai_side`, and `ai_level`.
+    """
 
     __tablename__ = "games"
 
@@ -48,6 +51,14 @@ class Game(Base):
     black_user_id: Mapped[Optional[str]] = mapped_column(
         String(36), ForeignKey("users.id", ondelete="SET NULL"), index=True, nullable=True
     )
+
+    # PvP/PvE configuration
+    # - mode: "pvp" (default) or "pve"
+    # - ai_side: "white" or "black" when mode == "pve"
+    # - ai_level: 1-3 heuristic strength
+    mode: Mapped[str] = mapped_column(String(8), default="pvp", index=True)
+    ai_side: Mapped[Optional[str]] = mapped_column(String(8), nullable=True)
+    ai_level: Mapped[int] = mapped_column(Integer, default=1)
 
     # Current game state
     fen: Mapped[str] = mapped_column(Text, default="startpos")

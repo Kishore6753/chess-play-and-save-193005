@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import delete, or_, select
 from sqlalchemy.orm import Session
 
-from src.chess_logic import apply_move, derive_turn_and_check
+from src.chess_logic import apply_move, derive_position_flags, generate_ai_move
 from src.db import get_db
 from src.models import Game, GameSnapshot, Move, User
 from src.schemas import (
@@ -35,15 +35,24 @@ def _serialize_move(m: Move) -> MoveResponse:
 
 
 def _serialize_game(game: Game) -> GameResponse:
-    turn, is_check = derive_turn_and_check(game.fen)
+    # Normalize "startpos" for client consumption.
+    fen_for_client = game.fen if game.fen != "startpos" else chess.Board().fen()
+    turn, is_check, is_checkmate, is_stalemate, is_draw = derive_position_flags(game.fen)
+
     return GameResponse(
         id=game.id,
         white_user_id=game.white_user_id,
         black_user_id=game.black_user_id,
-        fen=game.fen if game.fen != "startpos" else chess.Board().fen(),
+        mode=game.mode,
+        ai_side=game.ai_side,
+        ai_level=game.ai_level,
+        fen=fen_for_client,
         turn=turn,
         status=game.status,
         is_check=is_check,
+        is_checkmate=is_checkmate,
+        is_stalemate=is_stalemate,
+        is_draw=is_draw,
         moves=[_serialize_move(m) for m in game.moves],
     )
 
@@ -55,6 +64,15 @@ def _require_user_if_provided(db: Session, user_id: Optional[str]) -> None:
         raise HTTPException(status_code=400, detail=f"User '{user_id}' does not exist.")
 
 
+def _side_to_move_is_ai(game: Game) -> bool:
+    """Return True if the current side-to-move belongs to the AI for this game."""
+    if game.mode != "pve" or not game.ai_side:
+        return False
+    turn, _, _, _, _ = derive_position_flags(game.fen)
+    ai_turn = "w" if game.ai_side == "white" else "b"
+    return turn == ai_turn
+
+
 # PUBLIC_INTERFACE
 @router.post(
     "",
@@ -62,17 +80,33 @@ def _require_user_if_provided(db: Session, user_id: Optional[str]) -> None:
     status_code=status.HTTP_201_CREATED,
     responses={400: {"model": ErrorResponse}},
     summary="Create a new game",
-    description="Create a new chess game. Players are optional; if provided, they must exist.",
+    description=(
+        "Create a new chess game. Players are optional; if provided, they must exist. "
+        "Supports PvP and PvE (AI opponent) via optional mode/ai_side/ai_level fields."
+    ),
     operation_id="create_game",
 )
 def create_game(payload: CreateGameRequest, db: Session = Depends(get_db)) -> GameResponse:
-    """Create a game initialized to the standard starting position."""
+    """Create a game initialized to the standard starting position.
+
+    PvE rules:
+      - If mode == 'pve', ai_side is required and must be 'white' or 'black'.
+      - ai_level controls heuristic strength (1-3).
+    """
     _require_user_if_provided(db, payload.white_user_id)
     _require_user_if_provided(db, payload.black_user_id)
+
+    if payload.mode == "pve" and payload.ai_side is None:
+        raise HTTPException(status_code=400, detail="ai_side is required when mode='pve'.")
+    if payload.mode == "pvp" and payload.ai_side is not None:
+        raise HTTPException(status_code=400, detail="ai_side must be null when mode='pvp'.")
 
     game = Game(
         white_user_id=payload.white_user_id,
         black_user_id=payload.black_user_id,
+        mode=payload.mode,
+        ai_side=payload.ai_side,
+        ai_level=payload.ai_level,
         fen="startpos",
         status="active",
     )
@@ -143,6 +177,10 @@ def submit_move(game_id: str, payload: SubmitMoveRequest, db: Session = Depends(
     if game.status != "active":
         raise HTTPException(status_code=400, detail=f"Game is not active (status={game.status}).")
 
+    # Enforce that a human cannot play the AI side in PvE.
+    if game.mode == "pve" and game.ai_side and _side_to_move_is_ai(game):
+        raise HTTPException(status_code=400, detail="It is the AI's turn. Use /ai-move.")
+
     _ = game.moves
     move_number = len(game.moves) + 1
 
@@ -168,6 +206,71 @@ def submit_move(game_id: str, payload: SubmitMoveRequest, db: Session = Depends(
     db.refresh(game)
 
     # Reload move relationship for response
+    _ = game.moves
+    return _serialize_game(game)
+
+
+# PUBLIC_INTERFACE
+@router.post(
+    "/{game_id}/ai-move",
+    response_model=GameResponse,
+    responses={400: {"model": ErrorResponse}, 404: {"model": ErrorResponse}},
+    summary="Generate and apply an AI move",
+    description=(
+        "Generate a legal move for the current side-to-move (AI) and apply it to the game. "
+        "Only valid when the game is in PvE mode and it is currently the AI's turn."
+    ),
+    operation_id="ai_move",
+)
+def ai_move(game_id: str, db: Session = Depends(get_db)) -> GameResponse:
+    """Generate and apply an AI move for the current side-to-move.
+
+    Enforcement:
+      - Game must exist and be active.
+      - Game must be in PvE mode with ai_side set.
+      - It must be the AI's turn (based on current FEN + ai_side).
+      - Move legality is enforced by python-chess legal move generation.
+
+    Returns:
+        Updated GameResponse including updated FEN, status, derived flags, and move history.
+    """
+    game = db.get(Game, game_id)
+    if not game:
+        raise HTTPException(status_code=404, detail="Game not found.")
+
+    if game.status != "active":
+        raise HTTPException(status_code=400, detail=f"Game is not active (status={game.status}).")
+
+    if game.mode != "pve" or not game.ai_side:
+        raise HTTPException(status_code=400, detail="AI move is only available for PvE games.")
+
+    if not _side_to_move_is_ai(game):
+        raise HTTPException(status_code=400, detail="It is not the AI's turn.")
+
+    _ = game.moves
+    move_number = len(game.moves) + 1
+
+    try:
+        result = generate_ai_move(game.fen, ai_level=game.ai_level)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    move = Move(
+        game_id=game.id,
+        move_number=move_number,
+        uci=result.uci,
+        san=result.san,
+        fen_before=result.fen_before,
+        fen_after=result.fen_after,
+    )
+
+    game.fen = result.fen_after
+    game.status = result.status
+
+    db.add(move)
+    db.commit()
+    db.refresh(game)
+
     _ = game.moves
     return _serialize_game(game)
 

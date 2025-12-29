@@ -39,10 +39,37 @@ SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
 
 # PUBLIC_INTERFACE
 def init_db() -> None:
-    """Initialize database tables (create if missing)."""
+    """Initialize database tables (create if missing).
+
+    Also performs a lightweight best-effort migration for SQLite by adding new columns
+    if they are missing (this project intentionally avoids full migration tooling).
+    """
+    from sqlalchemy import inspect, text
+
     from src.models import Base  # local import to avoid import cycles
 
     Base.metadata.create_all(bind=engine)
+
+    # Best-effort schema migration for SQLite: add new Game columns if missing.
+    if engine.url.get_backend_name() == "sqlite":
+        inspector = inspect(engine)
+        try:
+            cols = {c["name"] for c in inspector.get_columns("games")}
+        except Exception:
+            cols = set()
+
+        alter_stmts = []
+        if "mode" not in cols:
+            alter_stmts.append("ALTER TABLE games ADD COLUMN mode VARCHAR(8) DEFAULT 'pvp'")
+        if "ai_side" not in cols:
+            alter_stmts.append("ALTER TABLE games ADD COLUMN ai_side VARCHAR(8)")
+        if "ai_level" not in cols:
+            alter_stmts.append("ALTER TABLE games ADD COLUMN ai_level INTEGER DEFAULT 1")
+
+        if alter_stmts:
+            with engine.begin() as conn:
+                for stmt in alter_stmts:
+                    conn.execute(text(stmt))
 
 
 # PUBLIC_INTERFACE

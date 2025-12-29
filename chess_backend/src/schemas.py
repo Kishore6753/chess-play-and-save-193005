@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import List, Optional
+from typing_extensions import Literal
 
 from pydantic import BaseModel, Field
 
@@ -20,9 +21,28 @@ class UserResponse(BaseModel):
     created_at: datetime = Field(..., description="UTC timestamp when the user was created.")
 
 
+GameMode = Literal["pvp", "pve"]
+AISide = Literal["white", "black"]
+
+
 class CreateGameRequest(BaseModel):
     white_user_id: Optional[str] = Field(None, description="User ID for white player (optional).")
     black_user_id: Optional[str] = Field(None, description="User ID for black player (optional).")
+
+    mode: GameMode = Field(
+        "pvp",
+        description="Game mode: 'pvp' (human vs human) or 'pve' (human vs AI).",
+    )
+    ai_side: Optional[AISide] = Field(
+        None,
+        description="When mode='pve', which side the AI plays: 'white' or 'black'.",
+    )
+    ai_level: int = Field(
+        1,
+        ge=1,
+        le=3,
+        description="AI difficulty level (1-3). Higher means stronger heuristic selection.",
+    )
 
 
 class MoveResponse(BaseModel):
@@ -37,10 +57,20 @@ class GameResponse(BaseModel):
     id: str = Field(..., description="Game ID (UUID).")
     white_user_id: Optional[str] = Field(None, description="User ID for white player.")
     black_user_id: Optional[str] = Field(None, description="User ID for black player.")
+
+    mode: GameMode = Field(..., description="Game mode: 'pvp' or 'pve'.")
+    ai_side: Optional[AISide] = Field(None, description="AI side when mode='pve'.")
+    ai_level: int = Field(..., description="AI level (1-3).")
+
     fen: str = Field(..., description="Current board state as FEN.")
     turn: str = Field(..., description="Side to move: 'w' or 'b'.")
     status: str = Field(..., description="Game status: active/checkmate/stalemate/draw.")
+
     is_check: bool = Field(..., description="Whether the side to move is currently in check.")
+    is_checkmate: bool = Field(..., description="Whether the position is checkmate.")
+    is_stalemate: bool = Field(..., description="Whether the position is stalemate.")
+    is_draw: bool = Field(..., description="Whether the game is drawn (incl. insufficient material / claimable draws).")
+
     moves: List[MoveResponse] = Field(default_factory=list, description="Move history.")
 
 
